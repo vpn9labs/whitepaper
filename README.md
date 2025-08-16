@@ -1,6 +1,6 @@
 # VPN9: A Zero‑Logs, Open‑Source Consumer VPN
 
-**Whitepaper v0.1**
+**Whitepaper v0.2**
 
 ---
 
@@ -14,6 +14,8 @@ VPN9 is a consumer‑focused, zero‑logs VPN with a fully open‑source stack. 
 
 This document specifies the threat model, the cryptographic and network architecture, operational controls behind the zero‑logs claim, supply‑chain guarantees, interfaces between components, and the roadmap for post‑quantum agility and censorship resilience.
 
+**v0.2 additions:** Two account types—**Anonymous** (no email, 7‑word token phrase, one‑time recovery code, account‑layer anonymity) and **Email** (recovery via email; email encrypted at rest; “we never share or sell your data”). **Bitcoin (BTC) and Monero (XMR)** payments are supported at launch.
+
 ---
 
 ## 1. Design Principles
@@ -24,6 +26,7 @@ This document specifies the threat model, the cryptographic and network architec
 4. **Separation of concerns.** The portal never sees traffic metadata. The control plane never stores user PII. Exit nodes never learn account identity.
 5. **Fail‑closed safety.** Any policy breach (interface down, daemon crash, handshake failure) forces a kill‑switch state.
 6. **Threat‑model clarity.** VPN9 is a privacy tool for network confidentiality and location obfuscation. It is not an anonymity network against a truly global passive adversary.
+7. **Account choice.** Anonymous account or Email account; both map to the same blind‑token service model; identity never reaches the data plane.
 
 ---
 
@@ -177,25 +180,50 @@ This document specifies the threat model, the cryptographic and network architec
 
 ### 8.1 Accounts
 
-* **Identity:** Email‑based or passkey (WebAuthn). No usernames. 2FA optional (TOTP/WebAuthn).
-* **Devices:** Soft‑limit per plan; device enrollment via short code; local device name exists only client‑side; server stores opaque device ID.
+**Two account types.**
+
+1. **Anonymous Account**
+
+   * **Identity:** No email. No personal information.
+   * **Credential:** A **7‑word token phrase** generated client‑side from a CSPRNG and public wordlist. The phrase is the only sign‑in secret.
+   * **Storage:** Server stores only a slow‑KDF (e.g., Argon2id) hash of the phrase and an opaque account ID. The raw words are never stored.
+   * **Recovery:** A **one‑time recovery code** is issued at creation, shown once, and stored server‑side as a hash. Using it rotates the token phrase and emits a new one‑time code; the old code is destroyed.
+   * **Properties:** Account‑layer anonymity. No email. No linkage to payment events (see §9). If both phrase and recovery code are lost, the account is unrecoverable by design.
+
+2. **Email Account**
+
+   * **Identity:** Email address only; no usernames.
+   * **Recovery:** Via signed email link. Optional 2FA (TOTP/WebAuthn) for additional protection.
+   * **Storage:** Email is **encrypted at rest** using per‑record envelope encryption with KMS/HSM‑protected keys. Backups are encrypted. Access is audited and least‑privileged.
+   * **Policy:** **We never share or sell your data.**
+
+**Devices:** Soft‑limit per plan; device enrollment via short code; local device name exists only client‑side; server stores an opaque device ID.
 
 ### 8.2 Privacy‑Preserving Payments
 
 * **Credit model:** Portal mints time credits as blind‑signed tokens. User redeems tokens in control plane to enable service periods.
 * **Unlinkability:** The token verifier (control plane) cannot link tokens to purchase events. The issuer (portal) cannot see which device redeems them.
-* **Traditional payments:** If user pays by card/processor, the transaction lives with the processor; portal stores only the processor’s opaque subscription ID.
-* **Alternative payments:** Support for privacy‑forward rails (e.g., cash‑equivalent vouchers or cryptocurrency) is implemented as separate token mints with identical redemption semantics.
+* **Traditional payments:** If the user pays by card/processor, the transaction resides with the processor; portal stores only the processor’s opaque subscription ID.
+* **Cryptocurrency (launch support):** **Bitcoin (BTC)** and **Monero (XMR)** supported at launch. Fresh addresses/subaddresses per payment; no address reuse. Purchase events mint blind tokens; no wallet metadata is linked to accounts.
+* **Network separation:** Payment processing is isolated from control plane. Only blind tokens cross the boundary.
 
 ### 8.3 Public API
 
-* **Auth:** OAuth2 device flow; tokens bound to device certs; scopes limited to metadata (regions, versions).
+* **Auth:** Device‑scoped tokens bound to device certs. For Email accounts, session established via email login challenge. For Anonymous accounts, session established by proving knowledge of the token phrase (PAKE‑style flow or KDF‑bound proof).
 * **Endpoints (illustrative):**
 
   * `POST /v1/device/enroll` – exchange enrollment code for bootstrap.
   * `GET /v1/regions` – signed directory snapshot with version/attestation hashes.
   * `POST /v1/token/redeem` – present blind token; receive service window receipt (no account identifiers).
-  * `GET /v1/app/latest` – client update manifest and detached signatures.
+  * **Anonymous flows:**
+
+    * `POST /v1/anon/register` – create anonymous account; returns account ID, token phrase, and one‑time recovery code.
+    * `POST /v1/anon/session` – begin session by presenting proof of token phrase knowledge.
+    * `POST /v1/anon/recover` – rotate token phrase using the one‑time recovery code.
+  * **Email flows:**
+
+    * `POST /v1/email/challenge` – send signed login link.
+    * `POST /v1/email/complete` – finalize session from challenge.
 
 ---
 
@@ -216,6 +244,7 @@ This document specifies the threat model, the cryptographic and network architec
 * Issuer cannot link purchases to redemptions.
 * Redeemer cannot trace tokens to accounts.
 * Double‑spend prevention does not reveal redemption histories.
+* BTC/XMR payments feed the same blind‑mint, preserving unlinkability.
 
 ---
 
@@ -272,6 +301,7 @@ This document specifies the threat model, the cryptographic and network architec
 * **Transparency reports.** Semiannual report of legal requests, all denials due to absence of records, and any compliance actions.
 * **Warrant canary.** Signed and updated on a fixed cadence.
 * **Jurisdiction strategy.** Control plane and portal isolated from exit jurisdictions; exits placed with providers meeting minimum transparency and contract terms prohibiting logging requirements.
+* **Data stewardship:** Email (if provided) is encrypted at rest; we do not share or sell data—by policy and by design.
 
 ---
 
@@ -280,8 +310,7 @@ This document specifies the threat model, the cryptographic and network architec
 * **Post‑quantum agility.** Hybrid KEM for control plane TLS (X25519 + Kyber class), client‑verifiable negotiation, and gradual WG‑handshake PQC research.
 * **MASQUE gateway.** HTTP/3‑native tunnels for high‑censorship regions.
 * **Local DNS‑over‑Oblivious (ODoH/Oblivious DoH).** Resolver privacy beyond in‑tunnel DoH.
-* **Accountless mode.** Pure token‑only devices with no portal identity.
-* **Hardware attestation.** TPM/SEV‑SNP/Nitro proofs for nodes operating in public clouds, exposed in directory for user selection.
+* **Shipped:** Anonymous Account (token‑phrase + one‑time recovery). Future: hardware‑bound recovery as an opt‑in.
 
 ---
 
@@ -335,6 +364,56 @@ GET /v1/regions
 }
 ```
 
+### 17.4 Anonymous Account (Portal)
+
+```
+POST /v1/anon/register
+
+200 OK
+{
+  "account_id": "acc_...",
+  "token_phrase": "word1-word2-word3-word4-word5-word6-word7",
+  "one_time_recovery_code": "RC-...."
+}
+```
+
+```
+POST /v1/anon/session
+{ "proof": "<KDF/PAKE proof derived from token_phrase>" }
+
+200 OK
+{ "session": "<JWT device-scoped>" }
+```
+
+```
+POST /v1/anon/recover
+{ "recovery_code": "RC-...." }
+
+200 OK
+{
+  "rotated_token_phrase": "word1-...-word7",
+  "new_one_time_recovery_code": "RC-...."
+}
+```
+
+### 17.5 Email Account (Portal)
+
+```
+POST /v1/email/challenge
+{ "email": "user@example.com" }
+
+200 OK
+{ "challenge_id": "ch_..." }
+```
+
+```
+POST /v1/email/complete
+{ "challenge_id": "ch_...", "token": "<link token>" }
+
+200 OK
+{ "session": "<JWT device-scoped>" }
+```
+
 ---
 
 ## 18. Operational Playbooks (Summary)
@@ -351,6 +430,7 @@ GET /v1/regions
 * Application logins, browser fingerprinting, and side channels can still identify users.
 * Some streaming or banking services may block known exit IPs; region rotation mitigates but cannot guarantee access.
 * In stealth modes, throughput may be reduced to preserve reachability.
+* Anonymous accounts provide **account‑layer** anonymity, not network‑layer anonymity. The threat‑model boundary remains as defined in §2.
 
 ---
 
@@ -358,9 +438,9 @@ GET /v1/regions
 
 ### `vpn9-portal` (Rails)
 
-* **Domains:** accounts, mint (blind‑signing service), billing adapters, email/passkey auth, device enrollment codes, public API.
-* **Security:** CSRF hardened sessions, strict CSP, readonly DB roles for API, background jobs with idempotent mints, rate‑limits on enroll/redeem.
-* **Data:** minimal PII (email, subscription state), processor IDs, mint public keys, transparency artifacts. No IP addresses retained.
+* **Domains:** accounts (Anonymous + Email), mint (blind‑signing service), billing adapters, email auth, device enrollment codes, public API.
+* **Security:** CSRF‑hardened sessions, strict CSP, readonly DB roles for API, background jobs with idempotent mints, rate‑limits on enroll/redeem.
+* **Data:** minimal PII (email only, if provided), **email encrypted at rest**, processor IDs, mint public keys, transparency artifacts. No IP addresses retained.
 
 ### `vpn9-service` (Rust)
 
@@ -378,7 +458,7 @@ GET /v1/regions
 
 ## 21. Compliance Mapping (Selective)
 
-* **GDPR/CCPA:** Data minimization by construction; right to erasure trivial (delete email and payment linkage—service continues on redeemed tokens).
+* **GDPR/CCPA:** Data minimization by construction. **Anonymous accounts:** no PII to erase. **Email accounts:** right to erasure deletes encrypted email and billing linkage; redeemed service continues on blind tokens.
 * **PCI scope:** Offloaded to payment processors; portal stores only opaque references.
 * **SLSA:** Target level 3 for provenance; agents refuse non‑attested images.
 
@@ -392,6 +472,8 @@ GET /v1/regions
 4. Confirm DNS resolvers disable ECS; verify with integrated DNS test.
 5. Validate blind‑mint public key in portal versus service verifier key in directory.
 6. Run integration tests that enforce kill‑switch behavior by forcibly terminating the tunnel interface and observing blocked egress.
+7. For **Anonymous accounts:** verify that only KDF‑hardened hashes of token phrases and recovery codes exist in the database and that recovery rotates secrets.
+8. For **Email accounts:** verify per‑record encryption and key‑management policies; confirm no data sharing pathways exist.
 
 ---
 
@@ -426,10 +508,11 @@ Block all outbound except to WireGuard peer and local loopback when `wg0` down; 
 
 ## Appendix B — Data We Keep (and For How Long)
 
-* Email (if provided), subscription state, payment processor opaque ID. **Retention:** while subscription active + tax/legal minimum.
-* Blind‑token spent set `H(T)`. **Retention:** rolling window ≤ service period + grace (e.g., 7 days).
-* Aggregate node health metrics (no IPs). **Retention:** sliding window ≤ 24h.
-* Crash reports (opt‑in). **Retention:** 30 days; scrubbed.
+* **Anonymous account:** opaque account ID; **KDF‑hardened hash** of token phrase; **KDF‑hardened hash** of one‑time recovery code; subscription state. **Retention:** while account active.
+* **Email account:** email (encrypted at rest), subscription state, payment processor opaque ID. **Retention:** while subscription active + tax/legal minimum.
+* **Blind‑token spent set `H(T)`.** **Retention:** rolling window ≤ service period + grace (e.g., 7 days).
+* **Aggregate node health metrics (no IPs).** **Retention:** sliding window ≤ 24h.
+* **Crash reports (opt‑in).** **Retention:** 30 days; scrubbed.
 
 **We do not collect or retain:** source IP, connection timestamps, DNS queries, ports, per‑device throughput.
 
@@ -452,6 +535,7 @@ Block all outbound except to WireGuard peer and local loopback when `wg0` down; 
 * **ECS:** EDNS Client Subnet.
 * **MASQUE:** HTTP/3 mechanism for proxying UDP/QUIC.
 * **SLSA:** Supply‑chain Levels for Software Artifacts.
+* **Token phrase:** A 7‑word passphrase generated from a public wordlist via a CSPRNG; stored only as a slow‑KDF hash.
 
 ---
 
